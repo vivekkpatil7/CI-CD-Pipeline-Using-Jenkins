@@ -1,0 +1,224 @@
+pipeline {
+    agent any
+    
+    
+    tools {
+        jdk 'jdk17'
+    }
+    
+    environment{
+        SCANNER_HOME= tool 'sonar'
+        
+    }
+   
+
+    stages {
+        stage('git-checkout') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/vivekdatacloud/resume_vivek.git'
+            }
+        }
+        
+        
+        stage('Install Dependencies') {
+            steps {
+                    sh 'pip install -r requirements.txt'
+            }
+        }
+        
+        
+        stage('Database Migration') {
+            steps {
+                    sh "python3 manage.py makemigrations"
+            }
+        }
+        
+        stage('Database Migration final') {
+            steps {
+                    sh "python3 manage.py migrate"
+            }
+        }
+        
+        stage('Collecting Static Files') {
+            steps {
+                    sh "python3 manage.py collectstatic --noinput"
+            }
+        }
+        
+        stage('Run test') {
+            steps {
+                    sh "python3 manage.py test"
+            }
+        }
+        
+        
+        
+        stage('OWASP Scan') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ ', odcInstallation: 'DP'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        
+        stage("SonarQube Analysis") {
+            steps {
+                withSonarQubeEnv('sonar_scanner') {
+                sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=resume \
+                -Dsonar.sources=. \
+                -Dsonar.python.pylint.reportPaths=pylint-report.xml \
+                -Dsonar.python.bandit.reportPaths=bandit-report.json \
+                -Dsonar.python.coverage.reportPaths=coverage.xml \
+                -Dsonar.projectKey=resume '''
+                }
+                
+            }
+            
+        }
+
+        stage('Notify Slack for Testing Deployment') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Please  ${currentBuild.fullDisplayName} Build : ${env.JOB_Name} Kindly check and http://13.232.252.135:9000/ Code Quality in sonarQube ! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+        stage('Build Docker Image of project') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment of Docker image to Testing server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+        
+        stage('Docker Build') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_auth', toolName: 'docker') {
+                        sh 'docker rmi -f vivekkpatil7/resume_app'
+                        sh 'docker rmi -f resume_app:latest'
+                        sh 'docker build -t resume_app .'
+                        sh 'docker tag resume_app vivekkpatil7/resume_app:latest'
+                    }
+                }
+            }
+        }
+        
+        stage('Push Docker Image to Docker Hub') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment of Docker image to Testing server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+        
+
+        stage('Docker Push to Docker Hub') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_auth', toolName: 'docker') {
+                        sh 'docker push vivekkpatil7/resume_app:latest'
+                        sh 'docker rmi -f resume_app:latest'
+                        sh 'docker rmi -f vivekkpatil7/resume_app'
+                    }
+                }
+            }
+        }
+
+
+        stage('Notify Slack for Deploy Docker image on Testing Server') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Please Approve ${currentBuild.fullDisplayName} Build : ${env.JOB_Name} proceed Deployment on production ! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+        stage('Approve for Deploy Docker image on Testing Server') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment on production server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+
+
+
+        stage('Deploy Docker image to Testing Server') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh 'ssh -o StrictHostKeyChecking=no ubuntu@65.0.109.56 docker pull vivekkpatil7/resume_app'
+                }
+            }   
+        }
+
+
+        stage('Run Docker Image to Remote Testing Server') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@65.0.109.56 docker stop resume_app  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@65.0.109.56 docker rm resume_appe  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@65.0.109.56 docker run -d --name resume -p 8000:8000 vivekkpatil7/resume_app"
+                }
+            }   
+        }
+
+
+        stage('Notify Slack for Production Server') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Please Approve ${currentBuild.fullDisplayName} Build : ${env.JOB_Name} proceed Deployment on production ! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+        stage('Approve for deploying on production server') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment on production server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+
+
+
+        stage('Artifact to Remote Server COPY delete') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh 'ssh -o StrictHostKeyChecking=no ubuntu@13.232.147.27 "rm -rf /home/ubuntu/python_app/*" '
+                }
+            }   
+        }
+        
+        stage('Artifact to Remote Server COPY') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh "scp -r -o StrictHostKeyChecking=no * ubuntu@13.232.147.27:/home/ubuntu/python_app"
+                }
+            }   
+        }
+
+        
+
+    }
+    
+    post {
+        success {
+            script {
+                slackSend(channel: "new_test", color: '#36a64f', message: "Build : ${env.JOB_Name} Python Pipeline Passed! Kindly check! ${env.BUILD_URL}")
+            }
+        }
+        
+        failure {
+            script {
+                slackSend(channel: "new_test", color: '#FF0000', message: "Build : ${env.JOB_Name} Python Pipeline FAILED! Kindly troubleshoot! ${env.BUILD_URL}")
+            }
+        }
+    }
+}
