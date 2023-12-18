@@ -1,0 +1,130 @@
+pipeline {
+    agent any
+    
+    
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+   
+    environment{
+        SCANNER_HOME= tool 'sonar'
+        
+    }
+
+    stages {
+        stage('git-checkout') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/to-do-app.git'
+            }
+        }
+        
+		stage('OWASP Dependency Check') {
+            steps {
+               dependencyCheck additionalArguments: '--scan ./', odcInstallation: 'DP'
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        
+        stage("Sonarqube Analysis "){
+            steps{
+                withSonarQubeEnv('sonar_scanner') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=to-do-app \
+                    -Dsonar.java.binaries=. \
+                    -Dsonar.projectKey=to-do-app '''
+                }
+            }
+        }
+        
+        stage('Notify Slack for Build Check') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Please Approve for docker build ${currentBuild.fullDisplayName} Build : ${env.JOB_Name}Kindly check and http://13.232.252.135:9000/ code Quality  ! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+        stage('Deploy Artifact for Build and Push Check ') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to Build and Push docker image?', ok: 'Deploy')
+	           }
+	       }
+	   }
+        
+        stage('Docker Build') {
+            steps {
+               script{
+                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                    sh "docker build -t  todoapp:latest -f backend/Dockerfile . "
+                    sh "docker tag todoapp:latest  vivekkpatil7/todoapp:latest "
+                 }
+               }
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+               script{
+                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                    sh "docker push  vivekkpatil7/todoapp:latest"
+                 }
+               }
+            }
+        }
+        
+        stage('Notify Slack for Testing Deployment') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Please check Docker image and Approve for deployment to remote testing server ${currentBuild.fullDisplayName} Build : ${env.JOB_Name}Kindly check and http://13.232.252.135:9000/ code Quality  ! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+        stage('Deploy Artifact for Testing Deployment') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment of Docker image to Testing server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+	   
+	   
+        stage('Pull Docker Image to Remote Server') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker pull vivekkpatil7/todoapp:latest"
+                }
+            }   
+        }
+        
+        stage('Run Docker Image to Remote Testing Server') {
+            steps {
+                sshagent(['3.108.63.42']) {
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker stop todoapp  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker rm todoapp  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker run -d --name todoapp -p 4000:4000 vivekkpatil7/todoapp:latest"
+                }
+            }   
+        }
+        
+    }
+    
+    post {
+        success {
+            script {
+                slackSend(channel: "new_test", color: '#36a64f', message: "Build : ${env.JOB_Name} Nodejs Pipeline Passed! Kindly check! ${env.BUILD_URL}")
+            }
+        }
+        
+        failure {
+            script {
+                slackSend(channel: "new_test", color: '#FF0000', message: "Build : ${env.JOB_Name} Nodejs Pipeline FAILED! Kindly troubleshoot! ${env.BUILD_URL}")
+            }
+        }
+    }
+}

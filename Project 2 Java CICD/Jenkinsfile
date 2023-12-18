@@ -1,0 +1,182 @@
+pipeline {
+    
+    
+    agent any
+    
+    
+    tools {
+        jdk 'jdk11'
+        maven 'maven3'
+    }
+    
+    environment{
+        SCANNER_HOME= tool 'sonar'
+    }
+    
+    stages {
+        stage('Git Code Cloning') {
+            steps {
+                git branch: 'master', url: 'https://github.com/jaiswaladi246/jpetstore-6.git'
+            }
+        }
+        
+         stage('Maven Code Compile') {
+            steps {
+                    sh "mvn compile"
+            }
+        }
+        
+        
+        
+        stage('Maven Unit Test cases') {
+            steps {
+                    sh "mvn test"
+            }
+        }
+        
+        stage('OWASP Scan') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ ', odcInstallation: 'DP'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        
+        
+        stage("Sonarqube Analysis "){
+            steps{
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=jpet \
+                    -Dsonar.java.binaries=. \
+                    -Dsonar.projectKey=jpet '''
+                }
+            }
+        }
+        
+        
+        stage('Maven code Built') {
+            steps {
+                sh 'mvn clean package'
+            }
+            post {
+                success {
+                    echo 'Archiving the artifacts'
+                    archiveArtifacts artifacts: '**/target/*.war'
+                }
+            }
+        }
+
+        
+        stage('Approval for docker build') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Check Sonar Qube code quality check, Do you want to proceed with the deployment on testing server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+
+        
+        stage('Docker Build') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_auth', toolName: 'docker') {
+                        sh 'docker build -t java_pipeline .'
+                        sh 'docker tag java_pipeline vivekkpatil7/java_pipeline:latest'
+                    }
+                }
+            }
+        }
+        
+
+        stage('Docker Push to Docker Hub') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_auth', toolName: 'docker') {
+                        sh 'docker push vivekkpatil7/java_pipeline:latest'
+                        sh 'docker rmi -f java_pipeline:latest'
+                    }
+                }
+            }
+        }
+        
+
+        stage('Notify Slack for testing server') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Deployment has been about to confirm by ${currentBuild.fullDisplayName} Build : ${env.JOB_Name} Passed! Kindly check! ${env.BUILD_URL}."
+                )
+            }
+        }
+        
+
+        stage('Deployment Approval') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed with the deployment on testing server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+        
+
+        stage('Pull Docker Image to Remote Server') {
+            steps {
+                sshagent(['3.111.217.156_2']) {
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker pull vivekkpatil7/java_pipeline"
+                }
+            }   
+        }
+        
+        stage('Run Docker Image to Remote Testing Server') {
+            steps {
+                sshagent(['3.111.217.156_2']) {
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@52.66.236.217 docker stop java_pipeline  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@52.66.236.217 docker rm java_pipeline  2>/dev/null || echo "
+                     sh "ssh -o StrictHostKeyChecking=no ubuntu@3.108.63.42 docker run -d --name petshop -p 8080:8080 vivekkpatil7/java_pipeline"
+                }
+            }   
+        }
+
+        stage('Notify Slack for stagging') {
+            steps {
+                slackSend(
+                    channel: '#new_test', 
+                    color: 'good',
+                    message: "Stagging Deployment has been about to confirm by ${currentBuild.fullDisplayName} Build : ${env.JOB_Name} Passed! Kindly check! ${env.BUILD_URL}."
+                )
+            }
+        }
+
+        stage('Deploy Artifact to stagging server') {
+            steps {
+                timeout(time: 15, unit: "MINUTES") {
+                    input(message: 'Do you want to proceed Deployment of Artifact to stagging server?', ok: 'Deploy')
+	           }
+	       }
+	   }
+
+       stage('Artifact to Remote Server stagging server') {
+            steps {
+                sshagent(['3.111.217.156_2']) {
+                     sh "scp -v -o StrictHostKeyChecking=no **/*.war ubuntu@43.204.143.182:/opt/apache-tomcat-9.0.65/webapps"
+                }
+            }   
+        }
+        
+        
+    }
+    
+    post {
+        success {
+            script {
+                slackSend(channel: "new_test", color: '#36a64f', message: "Build : ${env.JOB_Name} Passed! Kindly check! ${env.BUILD_URL}")
+            }
+        }
+        
+        failure {
+            script {
+                slackSend(channel: "new_test", color: '#FF0000', message: "Build : ${env.JOB_Name} FAILED! Kindly troubleshoot! ${env.BUILD_URL}")
+            }
+        }
+    }
+}
